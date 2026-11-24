@@ -105,6 +105,43 @@ if not mesh.vertex_groups:
     exec(compile(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'heat_weights.py')).read(),
                  'heat_weights.py', 'exec'))
 
+# Arms rebuilt along Marta's bones. The source rig gives the top of the upper
+# arm (pauldron and puffed red sleeve) to the clavicle and chest, so with the
+# arms down those parts stayed in T-pose and stretched into flaps. Inside the
+# arm tube everything past the shoulder joint now belongs to the arm: a short
+# blend at the shoulder, the upper arm on Arm, a clean Arm->ForeArm blend at
+# the elbow and the forearm on ForeArm. The wrist and hand keep their own
+# (correct) source weights.
+ARM_TUBE_R, ARM_TUBE_WIDE = .13, .22
+SHOULDER_IN, SHOULDER_OUT, ELBOW_HALF, WRIST_IN = .05, .04, .04, .03
+def smooth01(x): x = min(1., max(0., x)); return x * x * (3 - 2 * x)
+arm_fixed = 0
+for side, sg in (('Left', 1), ('Right', -1)):
+    js, je, jw = J[side + 'Arm']['head'], J[side + 'ForeArm']['head'], J[side + 'Hand']['head']
+    xs, xe, xw = sg * js.x, sg * je.x, sg * jw.x
+    for i, v in enumerate(mesh.data.vertices):
+        u = sg * v.co.x
+        if u < xs - SHOULDER_IN or u > xw - WRIST_IN: continue
+        a, b = (js, je) if u < xe else (je, jw)
+        f = min(1., max(0., (u - sg * a.x) / max(1e-6, sg * (b.x - a.x))))
+        axis = a.lerp(b, f)
+        # Near the shoulder the tube stays narrow (the cuirass side is right below);
+        # past the joint there is no torso, and the puffed sleeves are wide.
+        tube = ARM_TUBE_R if u < xs + .02 else ARM_TUBE_WIDE
+        if math.hypot(v.co.y - axis.y, v.co.z - axis.z) > tube: continue
+        if u < xe:
+            t_arm = smooth01((u - (xs - SHOULDER_IN)) / (SHOULDER_IN + SHOULDER_OUT))
+            t_fore = smooth01((u - (xe - ELBOW_HALF)) / (2 * ELBOW_HALF))
+        else:
+            t_arm, t_fore = 1., smooth01((u - (xe - ELBOW_HALF)) / (2 * ELBOW_HALF))
+        rest = {n: x for n, x in per_vertex[i].items() if not n.startswith(side + 'Arm') and not n.startswith(side + 'ForeArm')}
+        tot = sum(rest.values())
+        rest = {n: x / tot for n, x in rest.items()} if tot > 1e-6 else {side + 'Shoulder': 1.}
+        w = {n: x * (1 - t_arm) for n, x in rest.items()}
+        w[side + 'Arm'] = t_arm * (1 - t_fore); w[side + 'ForeArm'] = t_arm * t_fore
+        per_vertex[i] = {n: x for n, x in w.items() if x > 1e-4}; arm_fixed += 1
+print('ARMS_REBUILT', arm_fixed, flush=True)
+
 # Iron cuirass: the breast and back plates are one rigid piece on the chest
 # (Spine1). The source rig spreads them over Hips/Spine/Spine1 like cloth, so
 # a twist of the spine bent the plates and their gold stripes. Above the belt
@@ -138,7 +175,7 @@ print('RIGID_CUIRASS belt_z', BELT_Z, flush=True)
 # Head, the millstone ruff is rigid on the Neck (blending into the gorget at its
 # lower edge) and the neck skin inside the ruff blends from Neck to Head.
 CHIN_Z, NECK_BASE_Z, RUFF_LOW_Z, RUFF_TOP_Z = 1.58, 1.50, 1.46, 1.66
-NECK_R, RUFF_EDGE_R, RUFF_BACK_R = .085, .14, .105  # above the chin only the ruff's outer edge reaches past 14 cm
+NECK_R, RUFF_EDGE_R, RUFF_BACK_R, RUFF_OUTER_R = .085, .14, .105, .19  # above the chin only the ruff's outer edge reaches past 14 cm
 co_all = [v.co for v in mesh.data.vertices]
 top = [c for c in co_all if c.z > 1.70]
 cx = sum(c.x for c in top) / len(top); cy = sum(c.y for c in top) / len(top)
@@ -147,6 +184,7 @@ fixed = 0
 for i, c in enumerate(co_all):
     if c.z < RUFF_LOW_Z: continue
     r = math.hypot(c.x - cx, c.y - cy)
+    if r > RUFF_OUTER_R: continue  # the T-pose arms and pauldrons are at ruff height too
     # In front, above the chin, everything is face (the nose reaches past 14 cm); at the sides and back the skull is ~9-10 cm away and
     # the ruff rises to ear height, so it is taken past 10.5 cm.
     face_strip = c.y < cy - .03 and abs(c.x - cx) < .07  # nose, mouth, chin: never ruff
