@@ -4,7 +4,7 @@
 # skinned with the source weights (renamed to Marta's bones), and then the
 # skeleton is returned to Marta's native rest pose, carrying the mesh into
 # Marta's bind space. Head and hat are split into a rigid Head-only part.
-import bpy, os, sys, json, math
+import bpy, os, sys, json, math, collections
 import numpy as np
 from mathutils import Matrix, Vector
 
@@ -129,6 +129,9 @@ for side, sg in (('Left', 1), ('Right', -1)):
         # past the joint there is no torso, and the puffed sleeves are wide.
         tube = ARM_TUBE_R if u < xs + .02 else ARM_TUBE_WIDE
         if math.hypot(v.co.y - axis.y, v.co.z - axis.z) > tube: continue
+        # At the shoulder only the pauldron on top of the joint follows the arm; the
+        # breastplate and backplate sides below it stay on the chest (no armpit dent).
+        if u < xs + .02 and v.co.z < axis.z - .02: continue
         if u < xe:
             t_arm = smooth01((u - (xs - SHOULDER_IN)) / (SHOULDER_IN + SHOULDER_OUT))
             t_fore = smooth01((u - (xe - ELBOW_HALF)) / (2 * ELBOW_HALF))
@@ -175,11 +178,36 @@ print('RIGID_CUIRASS belt_z', BELT_Z, flush=True)
 # Head, the millstone ruff is rigid on the Neck (blending into the gorget at its
 # lower edge) and the neck skin inside the ruff blends from Neck to Head.
 CHIN_Z, NECK_BASE_Z, RUFF_LOW_Z, RUFF_TOP_Z = 1.58, 1.50, 1.46, 1.66
+RUFF_WHITE_TOP_Z = 1.72  # behind the ears the ruff rises higher than RUFF_TOP_Z
 NECK_R, RUFF_EDGE_R, RUFF_BACK_R, RUFF_OUTER_R = .085, .14, .105, .19  # above the chin only the ruff's outer edge reaches past 14 cm
 co_all = [v.co for v in mesh.data.vertices]
 top = [c for c in co_all if c.z > 1.70]
 cx = sum(c.x for c in top) / len(top); cy = sum(c.y for c in top) / len(top)
 def clamp01(x): return min(1., max(0., x))
+# The ruff and the beard are one fused mesh and sit at the same distance from
+# the neck, but the ruff is white and the beard is not: the base colour decides
+# (smoothed over neighbours so the shadows in the ruff pleats do not flicker).
+import numpy as np
+_img = bpy.data.images.load(os.path.join(BUILD, 'AmbrosioSpinola_BaseColor.png'))
+_W, _H = _img.size; _px = np.array(_img.pixels[:], dtype=np.float32).reshape(_H, _W, 4)
+_uv = mesh.data.uv_layers.active.data; _vuv = {}
+for p in mesh.data.polygons:
+    for li in p.loop_indices: _vuv.setdefault(mesh.data.loops[li].vertex_index, tuple(_uv[li].uv))
+def _white(i):
+    u, v = _vuv.get(i, (0., 0.)); c = _px[min(_H - 1, int(v % 1 * _H)), min(_W - 1, int(u % 1 * _W)), :3]
+    return c.mean() >= .72 and c.max() - c.min() < .18
+_zone = [i for i, c in enumerate(co_all) if RUFF_LOW_Z <= c.z < RUFF_WHITE_TOP_Z and math.hypot(c.x - cx, c.y - cy) <= RUFF_OUTER_R]
+white = {i: _white(i) for i in _zone}
+_nb = collections.defaultdict(set)
+for e in mesh.data.edges:
+    a, b = e.vertices
+    if a in white and b in white: _nb[a].add(b); _nb[b].add(a)
+for _ in range(2):
+    white = {i: (sum(white[j] for j in _nb[i]) + white[i]) * 2 > len(_nb[i]) + 1 for i in white}
+BEARD_LOW_Z = 1.49
+# The ruff rests on the shoulders: one uniform blend (so it stays a rigid ring)
+# that follows the neck only 40%.
+RUFF_NECK_SHARE = .4
 fixed = 0
 for i, c in enumerate(co_all):
     if c.z < RUFF_LOW_Z: continue
@@ -189,10 +217,15 @@ for i, c in enumerate(co_all):
     # the ruff rises to ear height, so it is taken past 10.5 cm.
     face_strip = c.y < cy - .03 and abs(c.x - cx) < .07  # nose, mouth, chin: never ruff
     edge = 9. if face_strip else RUFF_BACK_R
+    if c.z < CHIN_Z and c.z >= BEARD_LOW_Z and c.y < cy - .02 and abs(c.x - cx) < .09 and not white.get(i, True):
+        per_vertex[i] = {'Head': 1.}; fixed += 1; continue     # beard and chin: locked to the head
+    if white.get(i, False) and (c.z < CHIN_Z or (r > NECK_R and not face_strip and (c.z < RUFF_TOP_Z or r > .10))):
+        t = RUFF_NECK_SHARE                   # white = ruff, wherever it is
+        per_vertex[i] = {n: x for n, x in {'Neck': t, 'Spine1': 1 - t}.items() if x > 1e-4}; fixed += 1; continue
     if c.z >= CHIN_Z and not (r > edge and c.z < RUFF_TOP_Z):
         w = {'Head': 1.}                                        # head
     elif (r > NECK_R and c.z < CHIN_Z) or (r > edge and c.z < RUFF_TOP_Z):
-        t = clamp01((c.z - RUFF_LOW_Z) / .05)                   # ruff, onto the gorget
+        t = RUFF_NECK_SHARE                   # ruff, onto the gorget
         w = {'Neck': t, 'Spine1': 1 - t}
     elif c.z < CHIN_Z:
         t = clamp01((c.z - NECK_BASE_Z) / (CHIN_Z - NECK_BASE_Z))  # neck skin
